@@ -17,11 +17,11 @@ package cmd
 
 import (
 	"bufio"
+	"bytes"
 	"fmt"
 	"log"
 	"os"
 	"regexp"
-	"strings"
 
 	"github.com/spf13/cobra"
 )
@@ -83,25 +83,29 @@ func match(pattern *string, filename *string, enableLineNumber *bool) {
 	defer file.Close()
 
 	var bufferedScanner = bufio.NewScanner(file)
+	const bufSize = 1024 * 1024
+	buf := make([]byte, bufSize)
+	bufferedScanner.Buffer(buf, bufSize)
+
 	var lineNumber = 1
+	var patternBytes = []byte(*pattern)
 
 	for (bufferedScanner.Scan()) {
-		var line = bufferedScanner.Text()
 		var matched = false
 		if (isLiteral) {
-			if (strings.Contains(line, *pattern)) {
+			if (bytes.Contains(bufferedScanner.Bytes(), patternBytes)) {
 				matched = true
 			}
 		} else {
-			if (re.MatchString(line)) {
+			if (re.MatchString(bufferedScanner.Text())) {
 				matched = true
 			}
 		}
 		if (matched) {
 			if (*enableLineNumber) {
-				fmt.Fprintf(os.Stdout, "[%v]: %v\n", lineNumber, line)
+				fmt.Fprintf(os.Stdout, "[%v]: %v\n", lineNumber, bufferedScanner.Text())
 			} else {
-				fmt.Fprintf(os.Stdout, "%v\n", line)
+				fmt.Fprintf(os.Stdout, "%v\n", bufferedScanner.Text())
 			}
 		}
 		lineNumber++;
