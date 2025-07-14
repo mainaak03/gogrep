@@ -1,0 +1,4 @@
+testfiles/logfiles
+*.exe
+*.sh
+NUL

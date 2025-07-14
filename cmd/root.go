@@ -21,7 +21,9 @@ import (
 	"fmt"
 	"log"
 	"os"
+	"path/filepath"
 	"regexp"
+	"sync"
 
 	"github.com/spf13/cobra"
 )
@@ -72,43 +74,60 @@ func match(pattern *string, filename *string, enableLineNumber *bool) {
 	isLiteral := !regexp.MustCompile(`[.*+?^$()\[\]{}|\\]`).MatchString(*pattern)
 
 	var re *regexp.Regexp
-	if (isLiteral) {
+	if (!isLiteral) {
 		re = regexp.MustCompile(*pattern)
 	}
+	
+	patternBytes := []byte(*pattern)
+	
+	files, err := filepath.Glob(*filename)
+	if (err != nil || len(files) == 0) {
+		log.Fatalf("Error while listing files: %v", err.Error())
+	}
 
+	var wg sync.WaitGroup
+
+	for _, file := range(files) {
+		wg.Add(1)
+		go func (filename string) {
+			defer wg.Done()
+			matchText(&filename, &isLiteral, enableLineNumber, patternBytes, re)
+		}(file)
+	}
+	wg.Wait()
+}
+
+func matchText(filename *string, isLiteral *bool, enableLineNumber *bool, patternBytes []byte, re *regexp.Regexp) {
 	file, err := os.Open(*filename)
 	if (err != nil) {
 		log.Fatalf("Error while opening file: %v", err.Error())
 	}
 	defer file.Close()
-
+	
 	var bufferedScanner = bufio.NewScanner(file)
 	const bufSize = 1024 * 1024
 	buf := make([]byte, bufSize)
 	bufferedScanner.Buffer(buf, bufSize)
 
-	var lineNumber = 1
-	var patternBytes = []byte(*pattern)
-
+	lineNumber := 1
 	for (bufferedScanner.Scan()) {
 		var matched = false
-		if (isLiteral) {
+		if (*isLiteral) {
 			if (bytes.Contains(bufferedScanner.Bytes(), patternBytes)) {
 				matched = true
 			}
 		} else {
-			if (re.MatchString(bufferedScanner.Text())) {
+			if (re.Match(bufferedScanner.Bytes())) {
 				matched = true
 			}
 		}
 		if (matched) {
 			if (*enableLineNumber) {
-				fmt.Fprintf(os.Stdout, "[%v]: %v\n", lineNumber, bufferedScanner.Text())
+				fmt.Fprintf(os.Stdout, "[%v]-[%v]: %s\n", lineNumber, *filename, bufferedScanner.Bytes())
 			} else {
-				fmt.Fprintf(os.Stdout, "%v\n", bufferedScanner.Text())
+				fmt.Fprintf(os.Stdout, "[%v]: %s\n", *filename, bufferedScanner.Bytes())
 			}
 		}
 		lineNumber++;
-	}
-
+	}	
 }
