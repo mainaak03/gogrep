@@ -18,12 +18,13 @@ package cmd
 import (
 	"bufio"
 	"bytes"
-	"fmt"
 	"log"
 	"os"
 	"path/filepath"
-	"regexp"
+	"runtime/pprof"
+	"strconv"
 	"sync"
+	"github.com/BurntSushi/rure-go"
 
 	"github.com/spf13/cobra"
 )
@@ -34,6 +35,17 @@ var rootCmd = &cobra.Command{
 	Short: "Regex pattern matching implemented in Go",
 	Long:  ``,
 	Run: func(cmd *cobra.Command, args []string) {
+
+		f, err := os.Create("cpu.prof")
+		if err != nil {
+			panic(err)
+		}
+		defer f.Close()
+
+		// Start CPU profiling
+		pprof.StartCPUProfile(f)
+		defer pprof.StopCPUProfile()
+		
 		pattern, err_pattern := cmd.Flags().GetString("pattern")
 		if (err_pattern != nil) {
 			log.Fatalf("Error while parsing pattern: %v", err_pattern.Error())
@@ -71,11 +83,11 @@ func init() {
 func match(pattern *string, filename *string, enableLineNumber *bool) {
 	
 	// If the pattern is just a string literal, we will skip regex matching
-	isLiteral := !regexp.MustCompile(`[.*+?^$()\[\]{}|\\]`).MatchString(*pattern)
+	isLiteral := !rure.MustCompile(`[.*+?^$()\[\]{}|\\]`).IsMatch(*pattern)
 
-	var re *regexp.Regexp
+	var re *rure.Regex
 	if (!isLiteral) {
-		re = regexp.MustCompile(*pattern)
+		re = rure.MustCompile(*pattern)
 	}
 	
 	patternBytes := []byte(*pattern)
@@ -86,18 +98,20 @@ func match(pattern *string, filename *string, enableLineNumber *bool) {
 	}
 
 	var wg sync.WaitGroup
+	writer := bufio.NewWriter(os.Stdout)
+	defer writer.Flush()
 
 	for _, file := range(files) {
 		wg.Add(1)
 		go func (filename string) {
 			defer wg.Done()
-			matchText(&filename, &isLiteral, enableLineNumber, patternBytes, re)
+			matchText(&filename, &isLiteral, enableLineNumber, patternBytes, re, writer)
 		}(file)
 	}
 	wg.Wait()
 }
 
-func matchText(filename *string, isLiteral *bool, enableLineNumber *bool, patternBytes []byte, re *regexp.Regexp) {
+func matchText(filename *string, isLiteral *bool, enableLineNumber *bool, patternBytes []byte, re *rure.Regex, writer *bufio.Writer) {
 	file, err := os.Open(*filename)
 	if (err != nil) {
 		log.Fatalf("Error while opening file: %v", err.Error())
@@ -117,15 +131,27 @@ func matchText(filename *string, isLiteral *bool, enableLineNumber *bool, patter
 				matched = true
 			}
 		} else {
-			if (re.Match(bufferedScanner.Bytes())) {
+			if (re.IsMatchBytes(bufferedScanner.Bytes())) {
 				matched = true
 			}
 		}
 		if (matched) {
 			if (*enableLineNumber) {
-				fmt.Fprintf(os.Stdout, "[%v]-[%v]: %s\n", lineNumber, *filename, bufferedScanner.Bytes())
+				// fmt.Fprintf(os.Stdout, "[%v]-[%v]: %s\n", lineNumber, *filename, bufferedScanner.Bytes())
+				writer.WriteByte('[')
+				writer.WriteString(strconv.Itoa(lineNumber))
+				writer.WriteString("]-[")
+				writer.WriteString(*filename)
+				writer.WriteString("]: ")
+				writer.Write(bufferedScanner.Bytes())
+				writer.WriteByte('\n')
 			} else {
-				fmt.Fprintf(os.Stdout, "[%v]: %s\n", *filename, bufferedScanner.Bytes())
+				// fmt.Fprintf(os.Stdout, "[%v]: %s\n", *filename, bufferedScanner.Bytes())
+				writer.WriteByte('[')
+				writer.WriteString(*filename)
+				writer.WriteString("]: ")
+				writer.Write(bufferedScanner.Bytes())
+				writer.WriteByte('\n')
 			}
 		}
 		lineNumber++;
