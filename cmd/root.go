@@ -21,13 +21,29 @@ import (
 	"log"
 	"os"
 	"path/filepath"
+	"regexp"
 	"runtime/pprof"
 	"strconv"
 	"sync"
+
 	"github.com/BurntSushi/rure-go"
 
 	"github.com/spf13/cobra"
 )
+
+type WorkerConfig struct {
+	isLiteral           bool
+	enableLineNumber    bool
+	enableGoRegexEngine bool
+	patternBytes        []byte
+	rureRegex           *rure.Regex
+	goRegex             *regexp.Regexp
+}
+
+type IoConfig struct {
+	filenameChannel chan string
+	outputChannel   chan []byte
+}
 
 // rootCmd represents the base command when called without any subcommands
 var rootCmd = &cobra.Command{
@@ -45,20 +61,21 @@ var rootCmd = &cobra.Command{
 		// Start CPU profiling
 		pprof.StartCPUProfile(f)
 		defer pprof.StopCPUProfile()
-		
+
 		pattern, err_pattern := cmd.Flags().GetString("pattern")
-		if (err_pattern != nil) {
+		if err_pattern != nil {
 			log.Fatalf("Error while parsing pattern: %v", err_pattern.Error())
 		}
 		filename, err_filename := cmd.Flags().GetString("filename")
-		if (err_filename != nil) {
+		if err_filename != nil {
 			log.Fatalf("Error while parsing filename: %v", err_filename.Error())
 		}
 		enableLineNumber, err_enableLineNumber := cmd.Flags().GetBool("line-number")
-		if (err_enableLineNumber != nil) {
+		if err_enableLineNumber != nil {
 			log.Fatalf("Error: %v", err_filename.Error())
 		}
-		match(&pattern, &filename, &enableLineNumber)
+		enableGoRegexEngine, _ := cmd.Flags().GetBool("go-regex")
+		match(&pattern, &filename, &enableLineNumber, &enableGoRegexEngine)
 	},
 }
 
@@ -76,84 +93,125 @@ func init() {
 	rootCmd.Flags().StringP("filename", "f", "", "Filename to search")
 	rootCmd.Flags().BoolP("ignore-case", "i", false, "Enable case insensitive matching")
 	rootCmd.Flags().BoolP("line-number", "n", false, "Prefix matching lines with line numbers")
+	rootCmd.Flags().Bool("go-regex", false, "Use Go Regex Engine instead of Rust Regex Engine")
 	rootCmd.MarkFlagRequired("pattern")
 	rootCmd.MarkFlagRequired("filename")
 }
 
-func match(pattern *string, filename *string, enableLineNumber *bool) {
-	
+func match(pattern *string, path *string, enableLineNumber *bool, enableGoRegexEngine *bool) {
+
 	// If the pattern is just a string literal, we will skip regex matching
 	isLiteral := !rure.MustCompile(`[.*+?^$()\[\]{}|\\]`).IsMatch(*pattern)
 
 	var re *rure.Regex
-	if (!isLiteral) {
-		re = rure.MustCompile(*pattern)
+	var reGo *regexp.Regexp
+
+	if !isLiteral {
+		if *enableGoRegexEngine {
+			reGo = regexp.MustCompile(*pattern)
+		} else {
+			re = rure.MustCompile(*pattern)
+		}
 	}
-	
+
 	patternBytes := []byte(*pattern)
-	
-	files, err := filepath.Glob(*filename)
-	if (err != nil || len(files) == 0) {
+
+	files, err := filepath.Glob(*path)
+	if err != nil || len(files) == 0 {
 		log.Fatalf("Error while listing files: %v", err.Error())
 	}
 
-	var wg sync.WaitGroup
+	var matchWg sync.WaitGroup
+	var writerWg sync.WaitGroup
 	writer := bufio.NewWriter(os.Stdout)
 	defer writer.Flush()
 
-	for _, file := range(files) {
-		wg.Add(1)
-		go func (filename string) {
-			defer wg.Done()
-			matchText(&filename, &isLiteral, enableLineNumber, patternBytes, re, writer)
-		}(file)
+	filenameChannel := make(chan string, 1024 * 1024)
+	outputChannel := make(chan []byte, 4096 * 1024)
+
+	workerConfig := &WorkerConfig{
+		isLiteral:           isLiteral,
+		enableGoRegexEngine: *enableGoRegexEngine,
+		enableLineNumber:    *enableLineNumber,
+		patternBytes:        patternBytes,
 	}
-	wg.Wait()
+	if *enableGoRegexEngine {
+		workerConfig.goRegex = reGo
+	} else {
+		workerConfig.rureRegex = re
+	}
+
+	ioConfig := &IoConfig{
+		filenameChannel: filenameChannel,
+		outputChannel:   outputChannel,
+	}
+
+	writerWg.Add(1)
+	go func (outputChannel chan []byte) {
+		defer writerWg.Done()
+		for line := range outputChannel {
+			writer.Write(line)
+		}
+	}(outputChannel)
+
+	// Setting num-workers to 8 for now, more doesnt seem to provide more performnce
+	// as they are green threads and are scheduled on fixed number of OS threads
+	for range 8 {
+		matchWg.Add(1)
+		go matchTextWorker(workerConfig, ioConfig, &matchWg)
+	}
+
+	for _, filename := range files {
+		filenameChannel <- filename
+	}
+	close(filenameChannel)
+	matchWg.Wait()
+	close(outputChannel)
+	writerWg.Wait()
 }
 
-func matchText(filename *string, isLiteral *bool, enableLineNumber *bool, patternBytes []byte, re *rure.Regex, writer *bufio.Writer) {
-	file, err := os.Open(*filename)
-	if (err != nil) {
-		log.Fatalf("Error while opening file: %v", err.Error())
-	}
-	defer file.Close()
+func matchTextWorker(workerConfig *WorkerConfig, ioConfig *IoConfig, wg *sync.WaitGroup) {
 	
-	var bufferedScanner = bufio.NewScanner(file)
-	const bufSize = 1024 * 1024
-	buf := make([]byte, bufSize)
-	bufferedScanner.Buffer(buf, bufSize)
+	defer wg.Done()
 
-	lineNumber := 1
-	for (bufferedScanner.Scan()) {
-		var matched = false
-		if (*isLiteral) {
-			if (bytes.Contains(bufferedScanner.Bytes(), patternBytes)) {
-				matched = true
-			}
-		} else {
-			if (re.IsMatchBytes(bufferedScanner.Bytes())) {
-				matched = true
-			}
+	for filename := range ioConfig.filenameChannel {
+		file, err := os.Open(filename)
+		if err != nil {
+			log.Fatalf("Error while opening file: %v", err.Error())
 		}
-		if (matched) {
-			if (*enableLineNumber) {
-				// fmt.Fprintf(os.Stdout, "[%v]-[%v]: %s\n", lineNumber, *filename, bufferedScanner.Bytes())
-				writer.WriteByte('[')
-				writer.WriteString(strconv.Itoa(lineNumber))
-				writer.WriteString("]-[")
-				writer.WriteString(*filename)
-				writer.WriteString("]: ")
-				writer.Write(bufferedScanner.Bytes())
-				writer.WriteByte('\n')
+
+		bufferedScanner := bufio.NewScanner(file)
+		const bufSize = 1024 * 1024
+		buf := make([]byte, bufSize)
+		bufferedScanner.Buffer(buf, bufSize)
+
+		lineNumber := 1
+		for bufferedScanner.Scan() {
+			var matched = false
+			if workerConfig.isLiteral {
+				matched = bytes.Contains(bufferedScanner.Bytes(), workerConfig.patternBytes)
+			} else if workerConfig.enableGoRegexEngine {
+				matched = workerConfig.goRegex.Match(bufferedScanner.Bytes())
 			} else {
-				// fmt.Fprintf(os.Stdout, "[%v]: %s\n", *filename, bufferedScanner.Bytes())
-				writer.WriteByte('[')
-				writer.WriteString(*filename)
-				writer.WriteString("]: ")
-				writer.Write(bufferedScanner.Bytes())
-				writer.WriteByte('\n')
+				matched = workerConfig.rureRegex.IsMatchBytes(bufferedScanner.Bytes())
 			}
+
+			if matched {
+				// Creating a buffer because fmt.Sprintf is (kinda) slow
+				buf := make([]byte, 0, len(filename)+len(bufferedScanner.Bytes())+32)
+				buf = append(buf, '[')
+				buf = append(buf, filename...)
+				if workerConfig.enableLineNumber {
+					buf = append(buf, "]-["...)
+					buf = strconv.AppendInt(buf, int64(lineNumber), 10)
+				}
+				buf = append(buf, "]: "...)
+				buf = append(buf, bufferedScanner.Bytes()...)
+				buf = append(buf, '\n')
+				ioConfig.outputChannel <- buf
+			}
+			lineNumber++
 		}
-		lineNumber++;
-	}	
+		file.Close()
+	}
 }
