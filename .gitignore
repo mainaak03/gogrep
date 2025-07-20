@@ -1,4 +1,42 @@
-testfiles/logfiles
+# Logs and test outputs
+testfiles/logfiles/
+*.log
+
+# Binaries and scripts
 *.exe
+*.dll
+*.so
+*.dylib
 *.sh
-NUL
+*.bat
+*.out
+*.a
+*.o
+
+# Compiled languages
+build/
+target/
+dist/
+node_modules/
+__pycache__/
+*.class
+*.pyc
+*.wasm
+
+# Editor and environment config
+.vscode/
+.idea/
+*.swp
+*.swo
+*.bak
+
+# Version control / metadata
+.git/
+.hg/
+.svn/
+
+# OS / system files
+.DS_Store
+Thumbs.db
+ehthumbs.db
+desktop.ini
