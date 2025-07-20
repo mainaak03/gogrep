@@ -40,10 +40,11 @@ cargo build --release --manifest-path ./regex/Cargo.toml
 ```
 This will generate the necesary `librure.so` file that we will need later while linking.
 
-3. Set the following environment variables to let the linker know where our .so file lives
+3. Set the following environment variables to let the linker know where our .so and .h files live
 ```
 export LD_LIBRARY_PATH="$(pwd)/regex/target/release"
 export CGO_LDFLAGS="-L$(pwd)/regex/target/release"
+export CGO_CFLAGS="-I$(pwd)/regex/regex-capi/include"
 ```
 
 4. Inside the gogrep repo, build it with
