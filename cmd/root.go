@@ -16,14 +16,9 @@ limitations under the License.
 package cmd
 
 import (
-	"bufio"
-	"bytes"
-	"fmt"
-	"log"
+	cgoutils "gogrep/cgo-utils"
 	"os"
-	"path/filepath"
-	"regexp"
-	"sync"
+	"runtime/pprof"
 
 	"github.com/spf13/cobra"
 )
@@ -33,20 +28,33 @@ var rootCmd = &cobra.Command{
 	Use:   "gogrep",
 	Short: "Regex pattern matching implemented in Go",
 	Long:  ``,
+	Args: cobra.MinimumNArgs(2),
 	Run: func(cmd *cobra.Command, args []string) {
-		pattern, err_pattern := cmd.Flags().GetString("pattern")
-		if (err_pattern != nil) {
-			log.Fatalf("Error while parsing pattern: %v", err_pattern.Error())
+
+		profile, _ := cmd.Flags().GetBool("profile")
+		if profile {
+			f, err := os.Create("cpu.prof")
+			if err != nil {
+				panic(err)
+			}
+			defer f.Close()
+			pprof.StartCPUProfile(f)
+			defer pprof.StopCPUProfile()
 		}
-		filename, err_filename := cmd.Flags().GetString("filename")
-		if (err_filename != nil) {
-			log.Fatalf("Error while parsing filename: %v", err_filename.Error())
+
+		pattern := args[0]
+		path := args[1]
+
+		enableRecursive, _ := cmd.Flags().GetBool("recursive")
+		// enableLineNumber, _ := cmd.Flags().GetBool("line-number")
+		ignoreCase, _ := cmd.Flags().GetBool("ignore-case")
+
+		if ignoreCase {
+			// this is VERY hacky but I honestly don't want to model the logic in C 
+			pattern = "(?i)" + pattern
 		}
-		enableLineNumber, err_enableLineNumber := cmd.Flags().GetBool("line-number")
-		if (err_enableLineNumber != nil) {
-			log.Fatalf("Error: %v", err_filename.Error())
-		}
-		match(&pattern, &filename, &enableLineNumber)
+		
+		cgoutils.WalkAndMatch(path, pattern, enableRecursive)
 	},
 }
 
@@ -60,74 +68,8 @@ func Execute() {
 }
 
 func init() {
-	rootCmd.Flags().StringP("pattern", "p", "", "Regex expression to be matched")
-	rootCmd.Flags().StringP("filename", "f", "", "Filename to search")
 	rootCmd.Flags().BoolP("ignore-case", "i", false, "Enable case insensitive matching")
 	rootCmd.Flags().BoolP("line-number", "n", false, "Prefix matching lines with line numbers")
-	rootCmd.MarkFlagRequired("pattern")
-	rootCmd.MarkFlagRequired("filename")
-}
-
-func match(pattern *string, filename *string, enableLineNumber *bool) {
-	
-	// If the pattern is just a string literal, we will skip regex matching
-	isLiteral := !regexp.MustCompile(`[.*+?^$()\[\]{}|\\]`).MatchString(*pattern)
-
-	var re *regexp.Regexp
-	if (!isLiteral) {
-		re = regexp.MustCompile(*pattern)
-	}
-	
-	patternBytes := []byte(*pattern)
-	
-	files, err := filepath.Glob(*filename)
-	if (err != nil || len(files) == 0) {
-		log.Fatalf("Error while listing files: %v", err.Error())
-	}
-
-	var wg sync.WaitGroup
-
-	for _, file := range(files) {
-		wg.Add(1)
-		go func (filename string) {
-			defer wg.Done()
-			matchText(&filename, &isLiteral, enableLineNumber, patternBytes, re)
-		}(file)
-	}
-	wg.Wait()
-}
-
-func matchText(filename *string, isLiteral *bool, enableLineNumber *bool, patternBytes []byte, re *regexp.Regexp) {
-	file, err := os.Open(*filename)
-	if (err != nil) {
-		log.Fatalf("Error while opening file: %v", err.Error())
-	}
-	defer file.Close()
-	
-	var bufferedScanner = bufio.NewScanner(file)
-	const bufSize = 1024 * 1024
-	buf := make([]byte, bufSize)
-	bufferedScanner.Buffer(buf, bufSize)
-
-	lineNumber := 1
-	for (bufferedScanner.Scan()) {
-		var matched = false
-		if (*isLiteral) {
-			if (bytes.Contains(bufferedScanner.Bytes(), patternBytes)) {
-				matched = true
-			}
-		} else {
-			if (re.Match(bufferedScanner.Bytes())) {
-				matched = true
-			}
-		}
-		if (matched) {
-			if (*enableLineNumber) {
-				fmt.Fprintf(os.Stdout, "[%v]-[%v]: %s\n", lineNumber, *filename, bufferedScanner.Bytes())
-			} else {
-				fmt.Fprintf(os.Stdout, "[%v]: %s\n", *filename, bufferedScanner.Bytes())
-			}
-		}
-		lineNumber++;
-	}	
+	rootCmd.Flags().BoolP("recursive", "r", false, "Search recursivley inside dirs")
+	rootCmd.Flags().Bool("profile", false, "[debug] Profile go runtime")
 }
